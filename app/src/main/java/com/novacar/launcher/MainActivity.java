@@ -1,0 +1,599 @@
+package com.novacar.launcher;
+
+import android.Manifest;
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.MediaStore;
+import android.provider.Settings;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
+public class MainActivity extends Activity implements LocationListener, SensorEventListener {
+
+    private static final int REQ_LOC = 1001;
+    private LinearLayout rootLayout;
+    private SpeedometerView speedometerView;
+    private CompassView compassView;
+    private TextView clockView, gpsStatusView, fmFreqView, fmStateView;
+    private Button hudBtn, fmPlayBtn;
+
+    private LocationManager locationManager;
+    private SensorManager sensorManager;
+    private Sensor rotSensor, accSensor, magSensor;
+    private final float[] lastAcc = new float[3];
+    private final float[] lastMag = new float[3];
+    private boolean hasAcc = false, hasMag = false;
+
+    private boolean isHudMode = false;
+    private boolean isFmPlaying = false;
+    private double fmFreq = 98.5;
+
+    private final Handler clockHandler = new Handler(Looper.getMainLooper());
+    private final Runnable clockRunnable = new Runnable() {
+        @Override
+        public void run() {
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm  |  EEEE d MMMM", new Locale("ar"));
+            clockView.setText(sdf.format(new Date()));
+            clockHandler.postDelayed(this, 1000);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        );
+
+        buildUI();
+        initSensors();
+        initLocation();
+    }
+
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
+    }
+
+    private GradientDrawable cardBg(int color, int strokeColor) {
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(color);
+        gd.setCornerRadius(dp(16));
+        gd.setStroke(dp(1), strokeColor);
+        return gd;
+    }
+
+    private void buildUI() {
+        rootLayout = new LinearLayout(this);
+        rootLayout.setOrientation(LinearLayout.VERTICAL);
+        rootLayout.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        rootLayout.setBackgroundColor(Color.parseColor("#0A0E17"));
+        rootLayout.setPadding(dp(16), dp(12), dp(16), dp(12));
+
+        // Top Bar
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setPadding(dp(12), dp(8), dp(12), dp(8));
+        topBar.setBackground(cardBg(Color.parseColor("#121A2B"), Color.parseColor("#1E2D4A")));
+
+        TextView title = new TextView(this);
+        title.setText("نوفا كار لانشر");
+        title.setTextColor(Color.parseColor("#00E5FF"));
+        title.setTextSize(18);
+        title.setTypeface(null, Typeface.BOLD);
+        topBar.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        clockView = new TextView(this);
+        clockView.setTextColor(Color.WHITE);
+        clockView.setTextSize(16);
+        clockView.setGravity(Gravity.CENTER);
+        topBar.addView(clockView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.3f));
+
+        gpsStatusView = new TextView(this);
+        gpsStatusView.setText("GPS: جاري البحث...");
+        gpsStatusView.setTextColor(Color.parseColor("#FFB300"));
+        gpsStatusView.setTextSize(13);
+        gpsStatusView.setGravity(Gravity.CENTER);
+        topBar.addView(gpsStatusView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        hudBtn = new Button(this);
+        hudBtn.setText("وضع HUD");
+        hudBtn.setTextColor(Color.BLACK);
+        hudBtn.setTextSize(13);
+        hudBtn.setTypeface(null, Typeface.BOLD);
+        hudBtn.setBackground(cardBg(Color.parseColor("#00E5FF"), Color.parseColor("#00E5FF")));
+        hudBtn.setPadding(dp(14), dp(6), dp(14), dp(6));
+        hudBtn.setOnClickListener(v -> toggleHud());
+        topBar.addView(hudBtn, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)));
+
+        rootLayout.addView(topBar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        // Middle Dashboard Row
+        LinearLayout midRow = new LinearLayout(this);
+        midRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams midParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        midParams.setMargins(0, dp(10), 0, dp(10));
+
+        // Speedometer Card
+        LinearLayout speedCard = new LinearLayout(this);
+        speedCard.setOrientation(LinearLayout.VERTICAL);
+        speedCard.setGravity(Gravity.CENTER);
+        speedCard.setBackground(cardBg(Color.parseColor("#101726"), Color.parseColor("#1D2D44")));
+        speedCard.setPadding(dp(8), dp(8), dp(8), dp(8));
+        speedometerView = new SpeedometerView(this);
+        speedCard.addView(speedometerView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT));
+        LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.25f);
+        p1.setMargins(dp(4), 0, dp(4), 0);
+        midRow.addView(speedCard, p1);
+
+        // Compass Card
+        LinearLayout compCard = new LinearLayout(this);
+        compCard.setOrientation(LinearLayout.VERTICAL);
+        compCard.setGravity(Gravity.CENTER);
+        compCard.setBackground(cardBg(Color.parseColor("#101726"), Color.parseColor("#1D2D44")));
+        compCard.setPadding(dp(8), dp(8), dp(8), dp(8));
+        compassView = new CompassView(this);
+        compCard.addView(compassView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT));
+        LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        p2.setMargins(dp(4), 0, dp(4), 0);
+        midRow.addView(compCard, p2);
+
+        // FM Radio Card
+        LinearLayout fmCard = buildFmCard();
+        LinearLayout.LayoutParams p3 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.15f);
+        p3.setMargins(dp(4), 0, dp(4), 0);
+        midRow.addView(fmCard, p3);
+
+        rootLayout.addView(midRow, midParams);
+
+        // Bottom Shortcuts Dock
+        LinearLayout dock = new LinearLayout(this);
+        dock.setOrientation(LinearLayout.HORIZONTAL);
+        dock.setGravity(Gravity.CENTER);
+        dock.addView(makeShortcut("الخرائط", "#00B8D4", v -> openMaps()), dockBtnParams());
+        dock.addView(makeShortcut("الهاتف", "#00C853", v -> openPhone()), dockBtnParams());
+        dock.addView(makeShortcut("الموسيقى", "#AA00FF", v -> openMusic()), dockBtnParams());
+        dock.addView(makeShortcut("إعدادات النظام", "#FF9100", v -> openSettings()), dockBtnParams());
+
+        rootLayout.addView(dock, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)));
+        setContentView(rootLayout);
+    }
+
+    private LinearLayout.LayoutParams dockBtnParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        lp.setMargins(dp(6), 0, dp(6), 0);
+        return lp;
+    }
+
+    private Button makeShortcut(String label, String colorHex, View.OnClickListener listener) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(15);
+        b.setTypeface(null, Typeface.BOLD);
+        b.setBackground(cardBg(Color.parseColor("#162136"), Color.parseColor(colorHex)));
+        b.setOnClickListener(listener);
+        return b;
+    }
+
+    private LinearLayout buildFmCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setBackground(cardBg(Color.parseColor("#101726"), Color.parseColor("#1D2D44")));
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        TextView header = new TextView(this);
+        header.setText("راديو FM");
+        header.setTextColor(Color.parseColor("#00E5FF"));
+        header.setTextSize(16);
+        header.setTypeface(null, Typeface.BOLD);
+        header.setGravity(Gravity.CENTER);
+        card.addView(header);
+
+        fmFreqView = new TextView(this);
+        fmFreqView.setText(String.format(Locale.US, "%.1f MHz", fmFreq));
+        fmFreqView.setTextColor(Color.WHITE);
+        fmFreqView.setTextSize(28);
+        fmFreqView.setTypeface(null, Typeface.BOLD);
+        fmFreqView.setGravity(Gravity.CENTER);
+        fmFreqView.setPadding(0, dp(6), 0, dp(2));
+        card.addView(fmFreqView);
+
+        fmStateView = new TextView(this);
+        fmStateView.setText("متوقف");
+        fmStateView.setTextColor(Color.parseColor("#90A4AE"));
+        fmStateView.setTextSize(13);
+        fmStateView.setGravity(Gravity.CENTER);
+        card.addView(fmStateView);
+
+        LinearLayout ctrlRow = new LinearLayout(this);
+        ctrlRow.setOrientation(LinearLayout.HORIZONTAL);
+        ctrlRow.setGravity(Gravity.CENTER);
+        ctrlRow.setPadding(0, dp(8), 0, dp(8));
+
+        Button prev = new Button(this);
+        prev.setText("◄ -0.1");
+        prev.setTextColor(Color.WHITE);
+        prev.setBackground(cardBg(Color.parseColor("#1B2840"), Color.parseColor("#2E4469")));
+        prev.setOnClickListener(v -> tuneFm(-0.1));
+
+        fmPlayBtn = new Button(this);
+        fmPlayBtn.setText("تشغيل");
+        fmPlayBtn.setTextColor(Color.BLACK);
+        fmPlayBtn.setTypeface(null, Typeface.BOLD);
+        fmPlayBtn.setBackground(cardBg(Color.parseColor("#00E5FF"), Color.parseColor("#00E5FF")));
+        fmPlayBtn.setOnClickListener(v -> toggleFm());
+
+        Button next = new Button(this);
+        next.setText("+0.1 ►");
+        next.setTextColor(Color.WHITE);
+        next.setBackground(cardBg(Color.parseColor("#1B2840"), Color.parseColor("#2E4469")));
+        next.setOnClickListener(v -> tuneFm(0.1));
+
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, dp(38), 1f);
+        bp.setMargins(dp(3), 0, dp(3), 0);
+        ctrlRow.addView(prev, bp);
+        ctrlRow.addView(fmPlayBtn, bp);
+        ctrlRow.addView(next, bp);
+        card.addView(ctrlRow, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout presetRow = new LinearLayout(this);
+        presetRow.setOrientation(LinearLayout.HORIZONTAL);
+        double[] presets = {88.0, 92.4, 98.5, 104.2};
+        for (double p : presets) {
+            Button pb = new Button(this);
+            pb.setText(String.format(Locale.US, "%.1f", p));
+            pb.setTextSize(11);
+            pb.setTextColor(Color.parseColor("#00E5FF"));
+            pb.setBackground(cardBg(Color.parseColor("#141F33"), Color.parseColor("#233657")));
+            pb.setOnClickListener(v -> {
+                fmFreq = p;
+                updateFmUi();
+            });
+            LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(0, dp(34), 1f);
+            pp.setMargins(dp(2), 0, dp(2), 0);
+            presetRow.addView(pb, pp);
+        }
+        card.addView(presetRow, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        return card;
+    }
+
+    private void tuneFm(double delta) {
+        fmFreq = Math.round((fmFreq + delta) * 10.0) / 10.0;
+        if (fmFreq < 87.5) fmFreq = 108.0;
+        if (fmFreq > 108.0) fmFreq = 87.5;
+        updateFmUi();
+    }
+
+    private void toggleFm() {
+        isFmPlaying = !isFmPlaying;
+        updateFmUi();
+    }
+
+    private void updateFmUi() {
+        fmFreqView.setText(String.format(Locale.US, "%.1f MHz", fmFreq));
+        fmPlayBtn.setText(isFmPlaying ? "إيقاف" : "تشغيل");
+        fmStateView.setText(isFmPlaying ? "يتم البث على " + String.format(Locale.US, "%.1f MHz", fmFreq) : "متوقف");
+        fmStateView.setTextColor(isFmPlaying ? Color.parseColor("#00E676") : Color.parseColor("#90A4AE"));
+    }
+
+    private void toggleHud() {
+        isHudMode = !isHudMode;
+        rootLayout.setScaleY(isHudMode ? -1f : 1f);
+        hudBtn.setText(isHudMode ? "إلغاء HUD" : "وضع HUD");
+        hudBtn.setBackground(cardBg(Color.parseColor(isHudMode ? "#FFB300" : "#00E5FF"), Color.parseColor(isHudMode ? "#FFB300" : "#00E5FF")));
+    }
+
+    private void openMaps() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=")));
+        } catch (Exception e) {
+            Toast.makeText(this, "لا يوجد تطبيق خرائط مثبت", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void openPhone() {
+        try {
+            startActivity(new Intent(Intent.ACTION_DIAL));
+        } catch (Exception e) {
+            Toast.makeText(this, "تعذر فتح تطبيق الهاتف", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void openMusic() {
+        try {
+            startActivity(new Intent(MediaStore.INTENT_ACTION_MUSIC_PLAYER));
+        } catch (Exception e) {
+            try {
+                Intent i = new Intent(Intent.ACTION_MAIN);
+                i.addCategory(Intent.CATEGORY_APP_MUSIC);
+                startActivity(i);
+            } catch (Exception ex) {
+                Toast.makeText(this, "لا يوجد تطبيق موسيقى مثبت", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void openSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        } catch (Exception e) {
+            Toast.makeText(this, "تعذر فتح الإعدادات", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void initSensors() {
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        if (sensorManager != null) {
+            rotSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+            accSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+            magSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        }
+    }
+
+    private void initLocation() {
+        locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_LOC);
+        } else {
+            startGps();
+        }
+    }
+
+    private void startGps() {
+        try {
+            if (locationManager != null) {
+                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 500, 0f, this);
+                }
+                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2000, 0f, this);
+                }
+                gpsStatusView.setText("GPS: جاهز");
+                gpsStatusView.setTextColor(Color.parseColor("#00E676"));
+            }
+        } catch (SecurityException ignored) {
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQ_LOC && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startGps();
+        } else {
+            gpsStatusView.setText("GPS: الإذن مرفوض");
+            gpsStatusView.setTextColor(Color.parseColor("#FF5252"));
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        clockHandler.post(clockRunnable);
+        if (sensorManager != null) {
+            if (rotSensor != null) {
+                sensorManager.registerListener(this, rotSensor, SensorManager.SENSOR_DELAY_UI);
+            } else {
+                if (accSensor != null) sensorManager.registerListener(this, accSensor, SensorManager.SENSOR_DELAY_UI);
+                if (magSensor != null) sensorManager.registerListener(this, magSensor, SensorManager.SENSOR_DELAY_UI);
+            }
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        clockHandler.removeCallbacks(clockRunnable);
+        if (sensorManager != null) sensorManager.unregisterListener(this);
+    }
+
+    @Override
+    public void onLocationChanged(Location location) {
+        float kmh = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
+        speedometerView.setSpeed(kmh);
+        gpsStatusView.setText(String.format(Locale.US, "GPS: متصل (%.0f كم/س)", kmh));
+        gpsStatusView.setTextColor(Color.parseColor("#00E676"));
+        if (location.hasBearing() && rotSensor == null && !hasMag) {
+            compassView.setAzimuth(location.getBearing());
+        }
+    }
+
+    @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+    @Override public void onProviderEnabled(String provider) {}
+    @Override public void onProviderDisabled(String provider) {}
+
+    @Override
+    public void onSensorChanged(SensorEvent event) {
+        if (event.sensor.getType() == Sensor.TYPE_ROTATION_VECTOR) {
+            float[] rMat = new float[9];
+            float[] orient = new float[3];
+            SensorManager.getRotationMatrixFromVector(rMat, event.values);
+            SensorManager.getOrientation(rMat, orient);
+            float deg = (float) ((Math.toDegrees(orient[0]) + 360) % 360);
+            compassView.setAzimuth(deg);
+        } else if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+            System.arraycopy(event.values, 0, lastAcc, 0, 3);
+            hasAcc = true;
+        } else if (event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
+            System.arraycopy(event.values, 0, lastMag, 0, 3);
+            hasMag = true;
+        }
+        if (hasAcc && hasMag) {
+            float[] r = new float[9];
+            float[] i = new float[9];
+            if (SensorManager.getRotationMatrix(r, i, lastAcc, lastMag)) {
+                float[] orient = new float[3];
+                SensorManager.getOrientation(r, orient);
+                float deg = (float) ((Math.toDegrees(orient[0]) + 360) % 360);
+                compassView.setAzimuth(deg);
+            }
+        }
+    }
+
+    @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+
+    static class SpeedometerView extends View {
+        private float speed = 0f;
+        private float maxSpeedRecorded = 0f;
+        private final Paint bgArc = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fgArc = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint needlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint subPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF oval = new RectF();
+
+        public SpeedometerView(Context c) {
+            super(c);
+            bgArc.setStyle(Paint.Style.STROKE);
+            bgArc.setColor(Color.parseColor("#1E2D4A"));
+            bgArc.setStrokeCap(Paint.Cap.ROUND);
+
+            fgArc.setStyle(Paint.Style.STROKE);
+            fgArc.setColor(Color.parseColor("#00E5FF"));
+            fgArc.setStrokeCap(Paint.Cap.ROUND);
+
+            needlePaint.setColor(Color.parseColor("#FF5252"));
+            needlePaint.setStrokeCap(Paint.Cap.ROUND);
+
+            textPaint.setColor(Color.WHITE);
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+
+            subPaint.setColor(Color.parseColor("#90A4AE"));
+            subPaint.setTextAlign(Paint.Align.CENTER);
+        }
+
+        public void setSpeed(float kmh) {
+            this.speed = Math.max(0f, Math.min(240f, kmh));
+            if (this.speed > maxSpeedRecorded) maxSpeedRecorded = this.speed;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth(), h = getHeight();
+            float size = Math.min(w, h) * 0.82f;
+            float cx = w / 2f, cy = h / 2f + size * 0.05f;
+            float r = size / 2f;
+
+            bgArc.setStrokeWidth(r * 0.12f);
+            fgArc.setStrokeWidth(r * 0.12f);
+            needlePaint.setStrokeWidth(r * 0.04f);
+
+            oval.set(cx - r, cy - r, cx + r, cy + r);
+            canvas.drawArc(oval, 135f, 270f, false, bgArc);
+            float sweep = (speed / 240f) * 270f;
+            canvas.drawArc(oval, 135f, sweep, false, fgArc);
+
+            double rad = Math.toRadians(135f + sweep);
+            float nx = cx + (float) (Math.cos(rad) * r * 0.72f);
+            float ny = cy + (float) (Math.sin(rad) * r * 0.72f);
+            canvas.drawLine(cx, cy, nx, ny, needlePaint);
+
+            textPaint.setTextSize(r * 0.42f);
+            canvas.drawText(String.format(Locale.US, "%.0f", speed), cx, cy + r * 0.12f, textPaint);
+
+            subPaint.setTextSize(r * 0.15f);
+            canvas.drawText("كم/س", cx, cy + r * 0.34f, subPaint);
+            canvas.drawText(String.format(Locale.US, "القصوى: %.0f", maxSpeedRecorded), cx, cy + r * 0.65f, subPaint);
+        }
+    }
+
+    static class CompassView extends View {
+        private float azimuth = 0f;
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint needlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint dirPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        public CompassView(Context c) {
+            super(c);
+            ringPaint.setStyle(Paint.Style.STROKE);
+            ringPaint.setColor(Color.parseColor("#233657"));
+            ringPaint.setStrokeWidth(6f);
+
+            needlePaint.setColor(Color.parseColor("#FFB300"));
+            needlePaint.setStrokeWidth(8f);
+            needlePaint.setStrokeCap(Paint.Cap.ROUND);
+
+            textPaint.setColor(Color.WHITE);
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+
+            dirPaint.setColor(Color.parseColor("#00E5FF"));
+            dirPaint.setTextAlign(Paint.Align.CENTER);
+            dirPaint.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+
+        public void setAzimuth(float deg) {
+            this.azimuth = deg;
+            invalidate();
+        }
+
+        private String arabicDir(float deg) {
+            if (deg >= 337.5 || deg < 22.5) return "شمال";
+            if (deg < 67.5) return "شمال شرق";
+            if (deg < 112.5) return "شرق";
+            if (deg < 157.5) return "جنوب شرق";
+            if (deg < 202.5) return "جنوب";
+            if (deg < 247.5) return "جنوب غرب";
+            if (deg < 292.5) return "غرب";
+            return "شمال غرب";
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth(), h = getHeight();
+            float r = Math.min(w, h) * 0.36f;
+            float cx = w / 2f, cy = h / 2f;
+
+            canvas.drawCircle(cx, cy, r, ringPaint);
+            dirPaint.setTextSize(r * 0.24f);
+            canvas.drawText("ش", cx, cy - r + r * 0.28f, dirPaint);
+            canvas.drawText("ج", cx, cy + r - r * 0.10f, dirPaint);
+            canvas.drawText("ق", cx + r - r * 0.20f, cy + r * 0.08f, dirPaint);
+            canvas.drawText("غ", cx - r + r * 0.20f, cy + r * 0.08f, dirPaint);
+
+            double rad = Math.toRadians(azimuth - 90);
+            float nx = cx + (float) (Math.cos(rad) * r * 0.62f);
+            float ny = cy + (float) (Math.sin(rad) * r * 0.62f);
+            canvas.drawLine(cx, cy, nx, ny, needlePaint);
+
+            textPaint.setTextSize(r * 0.26f);
+            canvas.drawText(String.format(Locale.US, "%.0f° %s", azimuth, arabicDir(azimuth)), cx, cy + r * 1.25f, textPaint);
+        }
+    }
+}

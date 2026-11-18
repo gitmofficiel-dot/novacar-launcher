@@ -747,6 +747,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add settings.gradle gradle.properties build.gradle app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/com/novacar/launcher/MainActivity.java
+          git add -f NovaCarLauncher.apk
           git diff --staged --quiet || git commit -m "Add NovaCar Launcher Android source [skip ci]"
           git push
 
@@ -760,4 +761,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create v1.0.0 NovaCarLauncher.apk --title "NovaCar Launcher v1.0.0" --notes "تطبيق واجهة شاشة سيارة ذكية باللغة العربية (com.novacar.launcher) متوافق مع HOME و CAR_MODE بالوضع الأفقي، عداد سرعة GPS، بوصلة، وضع HUD، راديو FM، واختصارات الخرائط والهاتف والموسيقى والإعدادات." --clobber
+          gh release upload v1.0.0 NovaCarLauncher.apk --clobber || gh release create v1.0.0 NovaCarLauncher.apk --title "NovaCar Launcher v1.0.0" --notes "NovaCar Launcher v1.0.0 APK"
